@@ -1,57 +1,51 @@
 # SentriSend
 
-> **Stateless Outbound Email Security Gateway & Financial Attestation Enclave**  
-> *Pre-flight threat defense preventing AWS SES bounce bans, bot flood suspensions, and invoice redirection fraud.*
+> **Stateless Pre-Flight Email Security Gateway for Transactional Infrastructure**  
+> *Intercept bot signup floods and disposable domains in-memory before they trigger AWS SES bounce bans.*
 
 [![Status](https://img.shields.io/badge/API_Tests-80%2F80_Passed-10b981?style=flat-square)](https://sentrisend.com)
 [![Architecture](https://img.shields.io/badge/Architecture-Stateless_Zero--PII-0ea5e9?style=flat-square)](https://sentrisend.com)
-[![Compliance](https://img.shields.io/badge/Compliance-UK_.gov_Vendor_Listed-10b981?style=flat-square)](https://sentrisend.com)
-[![Statutory Seal](https://img.shields.io/badge/Companies_House-17412179-6366f1?style=flat-square)](https://sentrisend.com)
-[![Latency](https://img.shields.io/badge/Preflight_Latency-%3C2ms-f59e0b?style=flat-square)](https://sentrisend.com)
+[![Latency](https://img.shields.io/badge/Preflight_Latency-%3C2ms_In--Memory-f59e0b?style=flat-square)](https://sentrisend.com)
+[![Reliability](https://img.shields.io/badge/Reliability-Fail--Open_Supported-6366f1?style=flat-square)](https://sentrisend.com)
+[![Procurement](https://img.shields.io/badge/Procurement-UK_.gov_Vendor_Listed-10b981?style=flat-square)](https://sentrisend.com)
 
 ---
 
 ## ⚡ The Problem: The AWS SES 5% Bounce Cliff
 
-Most SaaS applications treat transactional email as background plumbing until an automated bot script hits their `/signup` or password-reset route with disposable emails.
+Most SaaS applications treat transactional email as background plumbing until an automated bot script hits their `/signup` or password-reset route with dead or disposable emails.
 
-1. **The Asymmetric Threat:** A bot injects 200 invalid/honeypot emails into your auth endpoint.
-2. **The Hard Bounce Spike:** Downstream providers (AWS SES, Resend, SendGrid) dispatch to dead mailboxes and record hard bounces.
-3. **The 5% Cliff:** AWS SES places accounts with bounce rates exceeding **5% on immediate probation** and shuts off sending completely at **10%**.
-4. **The Damage:** Real customers stop receiving login links, verification tokens, and Stripe payment receipts.
+1. **The Attack:** A bot injects 100–200 invalid/honeypot emails into your auth endpoint.
+2. **The Hard Bounce Wave:** Upstream providers (AWS SES, Resend, SendGrid) dispatch to dead mailboxes and record hard bounces.
+3. **The 5% Red Line:** AWS SES places accounts with bounce rates exceeding **5% on immediate probation** and shuts off sending completely at **10%**.
+4. **The Critical Outage:** Real customers stop receiving login links, verification tokens, and Stripe payment receipts.
 
-> **Retrospective suppression lists (SNS/SQS) fail to prevent this** because the reputation damage is recorded the second the email leaves the upstream server.
+> **Retrospective suppression lists (SNS/SQS) fail to prevent this** because the reputation damage is recorded the exact millisecond the email leaves the upstream server.
 
 ---
 
-## 🛡️ The Architecture
+## 🛡️ Pre-Flight Gateway Architecture
 
-SentriSend sits as a stateless, pre-flight security layer between your application backend and your downstream email provider:
+SentriSend sits as a lightweight, pre-flight security layer between your application backend and your sending provider:
 
 ```text
-[ Application / Next.js / Supabase Auth ]
-                    │
-                    ▼
-      [ SentriSend Security Gateway ]
-                    │
-    ┌───────────────┴───────────────────────────────┐
-    ▼                                               ▼
-1. Pre-Flight Threat Engine             2. Financial Attestation Enclave
-   • In-memory disposable domain block     • Intercepts Sort Code/IBAN/Amount
-   • Sub-2ms syntax & MX validation        • Cryptographic Merkle/SHA-256 seal
-   • Rate limits & payload sanitization    • Bound to Companies House #17412179
-                    │                               │
-                    └───────────────┬───────────────┘
-                                    ▼
-                [ Clean Delivery via AWS SES / Resend ]
-                      (Bounce Rate Stays at 0.0%)
+[ Supabase Auth / Next.js / Backend ]
+                  │
+                  ▼
+   [ SentriSend Pre-Flight Gateway ] ──(In-memory screening in <2ms)
+                  │
+    ┌─────────────┴─────────────────────────────┐
+    ▼                                           ▼
+[ Disposable / Bot Payload ]            [ Verified Real Address ]
+    ➔ Blocked with HTTP 400                 ➔ Dispatched via AWS SES / Resend
+    ➔ SES Never Invoked                     ➔ Bounce Rate Stays at 0.0%
 ```
 
 ---
 
-## 🚀 Quickstart: Send in 30 Seconds
+## 🚀 30-Second Quickstart (cURL)
 
-Test the pre-flight gateway directly from your terminal using our default verified sandbox sender:
+Test the pre-flight gateway directly from your terminal using our default verified sandbox sender (zero domain setup required):
 
 ```bash
 curl -X POST https://sentrisend.com/api/v1/send \
@@ -77,9 +71,9 @@ curl -X POST https://sentrisend.com/api/v1/send \
 
 ---
 
-## 🔒 3-Minute Supabase Auth Integration
+## 🔒 Next.js / Supabase Auth Integration (With Fail-Open Mode)
 
-Protect your Supabase Auth endpoints from bot signup floods in Next.js:
+Protect your Supabase Auth endpoints from bot signup floods while ensuring your authentication flow **never** goes down:
 
 ```typescript
 // pages/api/auth/send-verification.ts
@@ -88,61 +82,86 @@ import { NextApiRequest, NextApiResponse } from 'next';
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   const { email, token, type } = req.body;
 
-  // Dispatch via SentriSend Pre-Flight Gateway
-  const response = await fetch('https://sentrisend.com/api/v1/send', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${process.env.SENTRISEND_API_KEY}`,
-      'Content-Type': 'application/json',
-      'Idempotency-Key': `auth_${type}_${Date.now()}`
-    },
-    body: JSON.stringify({
-      to: email,
-      subject: type === 'signup' ? 'Verify your account' : 'Reset your password',
-      html: `<p>Your verification code is: <strong>${token}</strong></p>`,
-      from: 'SentriSend Sandbox <sandbox@sentrisend.com>',
-      reply_to: 'support@yourdomain.com'
-    })
-  });
+  try {
+    // 1. Pre-flight check via SentriSend
+    const response = await fetch('https://sentrisend.com/api/v1/send', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.SENTRISEND_API_KEY}`,
+        'Content-Type': 'application/json',
+        'Idempotency-Key': `auth_${type}_${Date.now()}`
+      },
+      body: JSON.stringify({
+        to: email,
+        subject: type === 'signup' ? 'Verify your account' : 'Reset your password',
+        html: `<p>Your verification code is: <strong>${token}</strong></p>`,
+        from: 'SentriSend Sandbox <sandbox@sentrisend.com>',
+        reply_to: 'support@yourdomain.com'
+      })
+    });
 
-  const result = await response.json();
+    const result = await response.json();
 
-  if (!response.ok) {
-    // Disposable domain or bot payload rejected BEFORE touching SES
-    console.warn(`[SentriSend Blocked]: ${result.error}`);
-    return res.status(400).json({ error: 'Disposable or high-risk email address rejected' });
+    if (!response.ok) {
+      // Disposable domain or bot payload rejected BEFORE touching SES
+      console.warn(`[SentriSend Blocked]: ${result.error}`);
+      return res.status(400).json({ error: 'Disposable or high-risk email address rejected' });
+    }
+
+    return res.status(200).json({ success: true, receipt: result.receipt });
+
+  } catch (error) {
+    // 2. Fail-Open Architecture: If gateway times out, fail open to direct dispatch
+    // ensuring user authentication is NEVER blocked by network hiccups.
+    console.warn('[SentriSend Gateway Unreachable - Failing Open to SES]:', error);
+    await fallbackDirectSend({ to: email, token });
+    return res.status(200).json({ success: true, fallback: true });
   }
-
-  return res.status(200).json({ success: true, receipt: result.receipt });
 }
 ```
 
 ---
 
-## 🏛️ Statutory Financial Attestation Enclave (BEC Defense)
+## ⏱️ Performance Benchmarks: The Pre-Flight Edge
 
-SentriSend includes native protection against **Business Email Compromise (BEC)** and invoice redirection fraud ($2.9B annual global loss):
+Traditional email validation services (ZeroBounce, Kickbox) rely on active external SMTP `RCPT TO` network handshakes, adding **300ms to 800ms of latency** and risking IP tarpits.
 
-* **Automated Coordinate Detection:** Outgoing invoices are scanned for banking coordinates (Sort Codes, Account Numbers, IBANs, amounts).
-* **Statutory Registry Binding:** Coordinates are hashed into a zero-knowledge claims proof bound to Bench Tech Audio Ltd’s statutory corporate registration (**UK Companies House No. 17412179**).
-* **Tamper-Evident Header & Seal:** Injects `X-SentriSend-Attestation` and an emerald footer seal with public verification at:
-  `https://sentrisend.com/verify/:proof_hash`
-* **Result:** If an attacker intercepts the email and alters a single digit of the bank account, the cryptographic seal breaks immediately.
+SentriSend operates on an **in-memory, stateless evaluation engine**:
+* **Pre-flight screening latency:** **< 2ms**
+* **Disposable domain dataset:** Maintained in-memory; zero network hops.
+* **Database write guarantee:** Full HMAC-SHA256 audit write confirmed before HTTP 200 is returned.
 
 ---
 
-## 📜 Zero-Knowledge Privacy Standard
+## 🔄 Fail-Open Reliability Guarantee
 
-* **Zero PII Stored:** SentriSend stores no recipient email addresses, message bodies, or raw customer data in database logs.
-* **Cryptographic Audit Trail:** Every dispatch generates an immutable SHA-256 HMAC proof for compliance under **UK GDPR**, **CCPA**, **P-Mark**, and **PIPA**.
-* **Institutional Standing:** Officially listed on the **UK .gov official vendor directory**.
+We know putting a security gateway in your authentication pipeline requires absolute trust:
+* **Sub-200ms Execution Timeout:** If an evaluation exceeds 200ms, our SDKs support immediate **Fail-Open**, routing directly to your backup provider so users can always log in.
+* **Deterministic Responses:** Structured HTTP 429 (`QUOTA_EXCEEDED`) and HTTP 503 (`AUDIT_UNCONFIRMED`) error codes prevent unhandled server exceptions and duplicate dispatch floods.
+
+---
+
+## 📜 Stateless Zero-PII Compliance
+
+* **Zero PII Stored:** SentriSend does not persist recipient email addresses, user identities, or message content in database logs.
+* **Cryptographic HMAC Receipts:** Every processed dispatch generates an immutable SHA-256 HMAC compliance proof (`hmac-sha256:v1:...`) enabling legal verification for **UK GDPR**, **CCPA**, and **PIPA** without data retention liabilities.
+* **Official Registry:** Listed on the **UK .gov official vendor directory**.
+
+---
+
+## 🏛️ Enterprise Add-On: Statutory Financial Attestation (BEC Defense)
+
+For corporate billing and high-liability finance workflows:
+* **Coordinate Interception:** Automatically scans outgoing invoices for banking coordinates (Sort Codes, Account Numbers, IBANs, amounts).
+* **Statutory Registry Binding:** Cryptographically binds coordinates to statutory corporate records (**UK Companies House No. 17412179**).
+* **Public Verifier:** Generates a tamper-evident emerald seal and verification link (`sentrisend.com/verify/:proof_hash`) to eliminate invoice redirection fraud (Vendor Email Compromise).
 
 ---
 
 ## 🔑 Free Developer Sandbox
 
-Claim 100 free requests/month with zero credit card required:
-👉 **[https://sentrisend.com](https://sentrisend.com)**
+Get an active sandbox key with 100 free requests/month (no credit card required):  
+👉 **[https://sentrisend.com/supabase](https://sentrisend.com/supabase)**
 
 ---
 
