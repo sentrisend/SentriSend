@@ -1,172 +1,142 @@
-# SentriSend
+// pages/api/auth/supabase-hook.ts
+import type { NextApiRequest, NextApiResponse } from 'next';
+import { Webhook } from 'standardwebhooks';
 
-> **Stateless Pre-Flight Email Security Gateway for Transactional Infrastructure**  
-> *Intercept bot signup floods and disposable domains in-memory before they trigger AWS SES bounce bans.*
+// Disable Next.js body parser to verify the raw Standard Webhook signature
+// (For App Router, read the raw body using `await req.text()` instead)
+export const config = {
+  api: {
+    bodyParser: false,
+  },
+};
 
-[![Status](https://img.shields.io/badge/API_Tests-80%2F80_Passed-10b981?style=flat-square)](https://sentrisend.com)
-[![Architecture](https://img.shields.io/badge/Architecture-Stateless_Zero--PII-0ea5e9?style=flat-square)](https://sentrisend.com)
-[![Latency](https://img.shields.io/badge/Preflight_Latency-%3C2ms_In--Memory-f59e0b?style=flat-square)](https://sentrisend.com)
-[![Reliability](https://img.shields.io/badge/Reliability-Fail--Open_Supported-6366f1?style=flat-square)](https://sentrisend.com)
-[![Procurement](https://img.shields.io/badge/Procurement-UK_.gov_Vendor_Listed-10b981?style=flat-square)](https://sentrisend.com)
-
----
-
-## ⚡ The Problem: The AWS SES 5% Bounce Cliff
-
-Most SaaS applications treat transactional email as background plumbing until an automated bot script hits their `/signup` or password-reset route with dead or disposable emails.
-
-1. **The Attack:** A bot injects 100–200 invalid/honeypot emails into your auth endpoint.
-2. **The Hard Bounce Wave:** Upstream providers (AWS SES, Resend, SendGrid) dispatch to dead mailboxes and record hard bounces.
-3. **The 5% Red Line:** AWS SES places accounts with bounce rates exceeding **5% on immediate probation** and shuts off sending completely at **10%**.
-4. **The Critical Outage:** Real customers stop receiving login links, verification tokens, and Stripe payment receipts.
-
-> **Retrospective suppression lists (SNS/SQS) fail to prevent this** because the reputation damage is recorded the exact millisecond the email leaves the upstream server.
-
----
-
-## 🛡️ Pre-Flight Gateway Architecture
-
-SentriSend sits as a lightweight, pre-flight security layer between your application backend and your sending provider:
-
-```text
-[ Supabase Auth / Next.js / Backend ]
-                  │
-                  ▼
-   [ SentriSend Pre-Flight Gateway ] ──(In-memory screening in <2ms)
-                  │
-    ┌─────────────┴─────────────────────────────┐
-    ▼                                           ▼
-[ Disposable / Bot Payload ]            [ Verified Real Address ]
-    ➔ Blocked with HTTP 400                 ➔ Dispatched via AWS SES / Resend
-    ➔ SES Never Invoked                     ➔ Bounce Rate Stays at 0.0%
-```
-
----
-
-## 🚀 30-Second Quickstart (cURL)
-
-Test the pre-flight gateway directly from your terminal using our default verified sandbox sender (zero domain setup required):
-
-```bash
-curl -X POST https://sentrisend.com/api/v1/send \
-  -H "Authorization: Bearer ss_live_your_api_key_here" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "to": "developer@company.com",
-    "subject": "SentriSend Gateway Verification",
-    "html": "<p>SentriSend pre-flight threat protection verified.</p>",
-    "from": "SentriSend Sandbox <sandbox@sentrisend.com>",
-    "reply_to": "developer@company.com"
-  }'
-```
-
-### Response (HTTP 200 OK):
-```json
-{
-  "success": true,
-  "receipt": "hmac-sha256:v1:8f2a4b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a",
-  "dispatched_at": "2026-10-08T10:00:00Z"
-}
-```
-
----
-
-## 🔒 Next.js / Supabase Auth Integration (With Fail-Open Mode)
-
-Protect your Supabase Auth endpoints from bot signup floods while ensuring your authentication flow **never** goes down:
-
-```typescript
-// pages/api/auth/send-verification.ts
-import { NextApiRequest, NextApiResponse } from 'next';
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const SUBJECT_MAP: Record<string, string> = {
+  signup: 'Verify your account',
+  recovery: 'Reset your password',
+  magiclink: 'Your magic login link',
+  reauthentication: 'Confirm your identity'
+};
+const SUPPORTED_TYPES = new Set(Object.keys(SUBJECT_MAP));
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  const { email, token, type } = req.body;
+  if (req.method !== 'POST') return res.status(405).end();
 
+  // 1. Verify Standard Webhooks Signature (Svix standard used by Supabase)
+  let payload: any;
   try {
-    // 1. Pre-flight check via SentriSend
-    const response = await fetch('https://sentrisend.com/api/v1/send', {
+    const rawBody = (await getRawBody(req)).toString('utf8');
+    const secret = (process.env.SEND_EMAIL_HOOK_SECRET || '').replace('v1,whsec_', '');
+    const wh = new Webhook(secret);
+    payload = wh.verify(rawBody, req.headers as Record<string, string>);
+  } catch (err) {
+    return res.status(401).json({ error: { http_code: 401, message: 'Invalid webhook signature' } });
+  }
+
+  // 2. Extract & Validate Supabase Payload
+  const { user, email_data } = payload;
+  const email = user?.email;
+  const token = email_data?.token; // 6-digit numeric OTP code
+  const tokenHash = email_data?.token_hash; // Hash used for confirmation links
+  const redirectTo = email_data?.redirect_to || process.env.NEXT_PUBLIC_SITE_URL || '';
+  const type = email_data?.email_action_type || 'signup';
+
+  if (!email || typeof email !== 'string' || !EMAIL_REGEX.test(email) || email.length > 254) {
+    return res.status(400).json({ error: { http_code: 400, message: 'Invalid recipient address' } });
+  }
+
+  // Explicitly guard against unsupported action types (e.g. email_change / invite)
+  if (!SUPPORTED_TYPES.has(type)) {
+    return res.status(400).json({ error: { http_code: 400, message: `Unsupported auth action type: ${type}` } });
+  }
+
+  // 3. Pre-Flight Threat Check via SentriSend (600ms timeout)
+  // Timeouts throw to catch; 429s, 5xx, and parse errors fall through safely to the mailer.
+  // Note: Enable Cloudflare Turnstile & Supabase native rate limits in your Supabase Auth 
+  // dashboard settings to prevent bot floods from exhausting your API quota or email bombing.
+  try {
+    const check = await fetch('https://sentrisend.com/api/v1/validate', {
       method: 'POST',
+      signal: AbortSignal.timeout(600), // Accommodates serverless cold starts
       headers: {
         'Authorization': `Bearer ${process.env.SENTRISEND_API_KEY}`,
-        'Content-Type': 'application/json',
-        'Idempotency-Key': `auth_${type}_${Date.now()}`
+        'Content-Type': 'application/json'
       },
-      body: JSON.stringify({
-        to: email,
-        subject: type === 'signup' ? 'Verify your account' : 'Reset your password',
-        html: `<p>Your verification code is: <strong>${token}</strong></p>`,
-        from: 'SentriSend Sandbox <sandbox@sentrisend.com>',
-        reply_to: 'support@yourdomain.com'
-      })
+      body: JSON.stringify({ email })
     });
 
-    const result = await response.json();
+    const data = await check.json().catch(() => ({}));
 
-    if (!response.ok) {
-      // Disposable domain or bot payload rejected BEFORE touching SES
-      console.warn(`[SentriSend Blocked]: ${result.error}`);
-      return res.status(400).json({ error: 'Disposable or high-risk email address rejected' });
+    // Block ONLY when explicitly flagged as a threat
+    if (data.allowed === false || data.disposable === true) {
+      return res.status(400).json({
+        error: {
+          http_code: 400,
+          message: 'Unsupported or high-risk email address rejected.'
+        }
+      });
     }
 
-    return res.status(200).json({ success: true, receipt: result.receipt });
+    if (check.status === 401) {
+      console.error('[SentriSend 401]: Invalid SENTRISEND_API_KEY configured');
+    }
+  } catch (err) {
+    // Fail-Open on timeout: Real users are never blocked by network latency
+    console.warn('[SentriSend Timeout - Failing Open to Mailer]:', err);
+  }
 
-  } catch (error) {
-    // 2. Fail-Open Architecture: If gateway times out, fail open to direct dispatch
-    // ensuring user authentication is NEVER blocked by network hiccups.
-    console.warn('[SentriSend Gateway Unreachable - Failing Open to SES]:', error);
-    await fallbackDirectSend({ to: email, token });
-    return res.status(200).json({ success: true, fallback: true });
+  // 4. Dispatch Email via Upstream Provider (AWS SES / Resend)
+  try {
+    const subject = SUBJECT_MAP[type];
+    const sendResult = await sendEmailViaProvider({ email, token, tokenHash, type, redirectTo, subject });
+
+    if (!sendResult.ok) {
+      return res.status(502).json({ error: { http_code: 502, message: sendResult.error || 'Upstream delivery failed' } });
+    }
+
+    // Supabase Auth strictly expects an empty JSON object on hook success
+    return res.status(200).json({});
+  } catch (err) {
+    return res.status(500).json({ error: { http_code: 500, message: 'Internal delivery failure' } });
   }
 }
-```
 
----
+// Mailer dispatch (Resend / AWS SES) supporting both Link and OTP Code
+async function sendEmailViaProvider({ email, token, tokenHash, type, redirectTo, subject }: any) {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+  
+  let htmlContent = '';
+  // Only build verification link if tokenHash exists (e.g. signup / recovery / magiclink)
+  if (tokenHash) {
+    const verifyUrl = `${supabaseUrl}/auth/v1/verify?token=${encodeURIComponent(tokenHash)}&type=${encodeURIComponent(type)}&redirect_to=${encodeURIComponent(redirectTo)}`;
+    htmlContent += `<p><a href="${verifyUrl}">Click here to complete authentication</a></p>`;
+  }
+  // Render OTP code if present (e.g. 6-digit code or reauthentication)
+  if (token) {
+    htmlContent += `<p>Or enter this verification code: <strong>${token}</strong></p>`;
+  }
 
-## ⏱️ Performance Benchmarks: The Pre-Flight Edge
+  // Guard against dispatching empty payloads
+  if (!htmlContent) {
+    return { ok: false, error: 'Missing token or verification link payload' };
+  }
 
-Traditional email validation services (ZeroBounce, Kickbox) rely on active external SMTP `RCPT TO` network handshakes, adding **300ms to 800ms of latency** and risking IP tarpits.
+  const response = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${process.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      from: 'Your App <auth@yourdomain.com>',
+      to: email,
+      subject,
+      html: htmlContent
+    })
+  });
+  return { ok: response.ok, error: response.ok ? null : await response.text().catch(() => 'Send error') };
+}
 
-SentriSend operates on an **in-memory, stateless evaluation engine**:
-* **Pre-flight screening latency:** **< 2ms**
-* **Disposable domain dataset:** Maintained in-memory; zero network hops.
-* **Database write guarantee:** Full HMAC-SHA256 audit write confirmed before HTTP 200 is returned.
-
----
-
-## 🔄 Fail-Open Reliability Guarantee
-
-We know putting a security gateway in your authentication pipeline requires absolute trust:
-* **Sub-200ms Execution Timeout:** If an evaluation exceeds 200ms, our SDKs support immediate **Fail-Open**, routing directly to your backup provider so users can always log in.
-* **Deterministic Responses:** Structured HTTP 429 (`QUOTA_EXCEEDED`) and HTTP 503 (`AUDIT_UNCONFIRMED`) error codes prevent unhandled server exceptions and duplicate dispatch floods.
-
----
-
-## 📜 Stateless Zero-PII Compliance
-
-* **Zero PII Stored:** SentriSend does not persist recipient email addresses, user identities, or message content in database logs.
-* **Cryptographic HMAC Receipts:** Every processed dispatch generates an immutable SHA-256 HMAC compliance proof (`hmac-sha256:v1:...`) enabling legal verification for **UK GDPR**, **CCPA**, and **PIPA** without data retention liabilities.
-* **Official Registry:** Listed on the **UK .gov official vendor directory**.
-
----
-
-## 🏛️ Enterprise Add-On: Statutory Financial Attestation (BEC Defense)
-
-For corporate billing and high-liability finance workflows:
-* **Coordinate Interception:** Automatically scans outgoing invoices for banking coordinates (Sort Codes, Account Numbers, IBANs, amounts).
-* **Statutory Registry Binding:** Cryptographically binds coordinates to statutory corporate records (**UK Companies House No. 17412179**).
-* **Public Verifier:** Generates a tamper-evident emerald seal and verification link (`sentrisend.com/verify/:proof_hash`) to eliminate invoice redirection fraud (Vendor Email Compromise).
-
----
-
-## 🔑 Free Developer Sandbox
-
-Get an active sandbox key with 100 free requests/month (no credit card required):  
-👉 **[https://sentrisend.com/supabase](https://sentrisend.com/supabase)**
-
----
-
-## 🏢 Corporate & Licensing
-
-* **Parent Entity:** Bench Tech Audio Ltd (Company No: 17412179, England & Wales)
-* **Registered Office:** Unit A, 82 James Carter Road, Mildenhall, Suffolk, IP28 7DE, UK
-* **Founder & Lead Systems Architect:** Steve Danby
+// Helper: Read raw request stream for signature verification
+async function getRawBody(req: NextApiRequest): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
+  return Buffer.concat(chunks);
+}
