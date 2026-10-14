@@ -219,12 +219,12 @@ Its limits: it covers your request **before** SentriSend adds its footer or any 
 **What is stored.**
 
 - **`/validate`:** submitted addresses are not persisted in application records. Only quota counters and rate-limit records keyed by hashed key and IP identifiers (not raw IP addresses) are kept.
-- **`/send`:** the audit record keeps the event type, timestamp, risk reasons, the HMAC receipt and a payload snapshot. In that snapshot the recipient, reply-to address and message bodies (HTML and text) are replaced with redaction markers, but **the subject, the sender and the intended use are kept as written**. Idempotency records keep a fingerprint of the request, the HTTP status and the response that was returned.
-- **Provider error messages** are recorded as received. If a provider repeats an address or other submitted text in an error, that text can be retained.
+- **`/send`:** the audit record keeps the event type, timestamp, risk reasons, the HMAC receipt and a payload snapshot. In that snapshot the recipient, subject, reply-to address and message bodies (HTML and text) are replaced with redaction markers, but **the sender and the intended use are kept as written**. Idempotency records keep a fingerprint of the request, the HTTP status and the response that was returned.
+- **Delivery failures** are recorded in the audit record with a generic code (`PROVIDER_DELIVERY_FAILED`), not the provider's raw error text. The error returned to you in the API response is unchanged.
 - Your delivery provider necessarily receives the recipient, subject and body in order to send the message.
-- No fixed retention period for audit records has been set yet, and this page doesn't describe what external infrastructure or providers retain.
+- No fixed retention period for audit records has been set yet, and this page doesn't describe what operational logs, external infrastructure or providers retain.
 
-Don't put secrets or sensitive personal data in subject lines.
+Because the receipt is calculated from the original request, the redacted audit snapshot can't be used to recompute it. Keep your own copy of anything you may need to check later.
 
 ---
 
