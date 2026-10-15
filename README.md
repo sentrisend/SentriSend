@@ -256,6 +256,17 @@ These are **not available yet**. They are listed so you know what to expect, not
 
 - Questions and bug reports: open a [GitHub issue](../../issues).
 - **Security issues:** please don't post them in a public issue. Use this repository's private reporting: **Security → Report a vulnerability**.
+## npm SDK
+
+`npm install sentrisend`
+
+```js
+import { validate } from "sentrisend";
+const result = await validate("user@example.com", { apiKey: process.env.SENTRISEND_API_KEY });
+if (result.allowed === false) console.log("Blocked:", result.reason);
+```
+
+Default `failureMode: "open"` allows the address on timeout, network failure or API 5xx; `"closed"` throws instead. Server-side only, never in browser code; it does not confirm mailbox existence or detect bots. [sentrisend on npm](https://www.npmjs.com/package/sentrisend)
 
 ## Licence
 
