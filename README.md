@@ -1,8 +1,16 @@
 # SentriSend
 
-**Pre-flight email validation and gated sending, as a simple HTTP API.**
+**Email validation, gated sending and a signup-protection hook for Supabase, as a simple HTTP API.**
 
-SentriSend checks an email address *before* you send to it: is the syntax valid, is the domain a known disposable provider, does the domain exist, and can it receive mail? It can also send the message for you and return a signed audit receipt.
+SentriSend checks an email address *before* you send to it or let it sign up: is the syntax valid, is the domain a known disposable provider, does the domain exist, and can it receive mail? It can also send the message for you behind sender-reputation controls and return a signed audit receipt.
+
+What you can use it for:
+
+- **Validate addresses** in signup forms and before sending (`POST /validate`, or the [npm package](https://www.npmjs.com/package/sentrisend)).
+- **Block disposable and non-existent domains in Supabase Auth** with a hosted "Before User Created" hook. No code to deploy: [guide](https://sentrisend.com/supabase).
+- **Send through a gateway** that runs the same address checks, content and threat checks, rate limits and a sender-reputation circuit breaker before the message goes to your delivery provider (`POST /send`).
+
+Links:
 
 - Website and free key: **https://sentrisend.com**
 - API base URL: `https://sentrisend.com/api/v1`
@@ -18,12 +26,12 @@ SentriSend checks an email address *before* you send to it: is the syntax valid,
 
 | Check | Detail |
 |---|---|
-| Syntax | The address is a plain `name@domain` address of 3–254 characters. Quoted and internationalised address forms are not supported. |
-| Disposable domains | Matched against a bundled list of about 133,600 disposable domains, including their subdomains. |
+| Syntax | The address is a plain `name@domain` address of 3-254 characters. Quoted and internationalised address forms are not supported. |
+| Disposable domains | Matched against a bundled list of about 134,100 disposable domains, including their subdomains. |
 | Domain exists | A live DNS lookup tells a non-existent domain apart from a domain with no mail records. |
 | Can receive mail | Looks for MX records. If there are none, a usable IPv4 A record is accepted as a fallback. An explicit "null MX" (a domain that says it takes no mail) is rejected. |
 
-**What it does not do.** It does not confirm that a particular mailbox exists, it does not contact the recipient's mail server, and it does not detect role accounts (such as `info@`) or suggest typo fixes. A passing result means the domain can receive mail, not that the person's mailbox is real.
+**What it does not do.** It does not confirm that a particular mailbox exists, it does not contact the recipient's mail server, and it does not detect role accounts (such as `info@`), suggest typo fixes or detect bots. A passing result means the domain can receive mail, not that the person's mailbox is real.
 
 **If DNS is slow or unavailable,** the address is allowed with a `MEDIUM` risk score and the reason `DNS_INCONCLUSIVE`, rather than being rejected.
 
@@ -31,7 +39,7 @@ SentriSend checks an email address *before* you send to it: is the syntax valid,
 
 ## Quick start
 
-1. Get a free key at https://sentrisend.com. Keys start with `ss_live_`. There is one free key per normalised email address (see [Free keys](#free-keys) below).
+1. Get a free key at https://sentrisend.com. Keys start with `ss_live_`. There is one free key per normalised email address (see [Free keys](#free-keys)).
 2. Keep the key secret. Use it from your server, never from browser code.
 
 ### Validate an address
@@ -59,6 +67,21 @@ Blocked (HTTP 400):
 
 `/validate` accepts the key only as `Authorization: Bearer YOUR_API_KEY`.
 
+### Use the npm package
+
+```sh
+npm install sentrisend
+```
+
+```js
+import { validate } from "sentrisend";
+
+const result = await validate("user@example.com", { apiKey: process.env.SENTRISEND_API_KEY });
+if (result.allowed === false) console.log("Blocked:", result.reason);
+```
+
+Node.js 18 or newer, no runtime dependencies. The default `failureMode: "open"` allows the address on timeout, network failure or API 5xx; `"closed"` throws instead. Server-side only. The package validates addresses; it does not send email. See [sentrisend on npm](https://www.npmjs.com/package/sentrisend).
+
 ### Send an email
 
 ```bash
@@ -75,7 +98,7 @@ curl -X POST 'https://sentrisend.com/api/v1/send' \
 
 **With a free key, replace `user@example.com` with your own address**, the one you signed up with. Any other recipient returns `403 RECIPIENT_NOT_VERIFIED`.
 
-`/send` runs the same address checks first, plus content-policy and threat-signature checks, then hands the message to the delivery provider. It accepts the key as `Authorization: Bearer …` or as `x-api-key: …` (if both are sent, `x-api-key` is used).
+`/send` runs the same address checks first, plus content-policy and threat-signature checks, abuse controls and sender-reputation checks, then hands the message to the delivery provider. It accepts the key as `Authorization: Bearer ...` or as `x-api-key: ...` (if both are sent, `x-api-key` is used).
 
 Success (HTTP 200). The values shown are illustrative:
 
@@ -100,15 +123,42 @@ Success (HTTP 200). The values shown are illustrative:
 | Field | Required | Notes |
 |---|---|---|
 | `to` | Yes | One address, or a non-empty array of addresses. |
-| `subject` | Yes | 3–100 characters. |
+| `subject` | Yes | 3-100 characters. |
 | `html` | Yes | At least 5 characters. |
 | `text` | No | Plain-text alternative. If supplied, at least 1 character. |
 | `from` | No | Sender address, with or without a display name. Some sender identities are reserved, and your delivery provider must accept the address. |
 | `reply_to` | No | Reply address. |
 | `intendedUse` | No | Free-text label. Defaults to `General Notification`. |
-| `whiteLabel` | No | Requests white-label sending. It only takes effect if SentriSend has enabled it for your account (see [Pricing](#limits-and-pricing)). |
+| `whiteLabel` | No | Requests white-label sending. It only takes effect if SentriSend has enabled it for your account (see [Limits and pricing](#limits-and-pricing)). |
 
-The request body is limited to 100 KB. The optional `Idempotency-Key` header (1–256 characters from `A–Z a–z 0–9 . _ : -`) makes retries safe: reuse the same value for retries of the same email. If you leave it out, a repeat request is treated as a new email.
+The request body is limited to 100 KB. The optional `Idempotency-Key` header (1-256 characters from `A-Z a-z 0-9 . _ : -`) makes retries safe: reuse the same value for retries of the same email. If you leave it out, a repeat request is treated as a new email.
+
+---
+
+## Supabase signup protection (hosted hook)
+
+SentriSend can check every new signup in **Supabase Auth** before the account is created, using Supabase's "Before User Created" HTTP hook. There is nothing to deploy.
+
+1. Get a SentriSend key and create a hook in the SentriSend dashboard. You receive a hook URL and a signing secret.
+2. In Supabase, open **Authentication > Hooks > Before User Created**, choose the HTTP option, and paste the URL and secret.
+3. Test with a signup.
+
+- Allowed signups get `HTTP 200 {}`.
+- Blocked signups get HTTP 200 with a Supabase error object (`http_code` 400, "This email address can't be used to sign up."). The 200 status is intentional: Supabase currently passes hook errors through only when the hook returns 200 or 202.
+- **Fail-open:** if a check times out or fails, the signup is allowed. A missing email, a disabled hook or an unknown hook ID are also allowed.
+- Requests are signature-checked (Standard Webhooks). The hook has its own limit of 60 requests a minute.
+- Safe retries: a retried request gets the earlier verdict and is not charged twice.
+- In our testing, users created directly from the Supabase dashboard do not trigger this hook.
+
+We have tested allow and block against a real Supabase project. Full guide: https://sentrisend.com/supabase
+
+---
+
+## Sender-reputation circuit breaker
+
+Sends are tied to an API key, and delivery events (delivered, bounced, complained) are fed back to SentriSend. When a key's recent hard bounces or complaints get too high, the gateway first warns, then slows the key down, and then pauses it. A paused key needs an administrator to un-pause it, after which it runs under a probation period. The aim is to stop one bad send run from damaging your provider account. The exact thresholds are not published.
+
+The stages are covered by automated tests. A live end-to-end threshold test against real bounce events is still to be done, so treat the breaker as new.
 
 ---
 
@@ -122,11 +172,11 @@ The error format is **not uniform yet** (see the [roadmap](#roadmap)). Check the
 |---|---|---|
 | 400 | `INVALID_EMAIL` | The address is missing or malformed. |
 | 400 | *(no code; `allowed: false`)* | A blocked verdict, with a `reason`. |
-| 401 | – | Missing or invalid key. |
-| 403 | – | Subscription inactive. |
+| 401 | - | Missing or invalid key. |
+| 403 | - | Subscription inactive. |
 | 429 | `RATE_LIMITED` | Too many requests. Includes a `Retry-After` header and a `retry_after` field. |
 | 429 | `QUOTA_EXCEEDED` | Monthly allowance used up. |
-| 503 | – | Authentication, quota or rate-limit service unavailable. |
+| 503 | - | Authentication, quota or rate-limit service unavailable. |
 
 ### `/send`
 
@@ -138,6 +188,10 @@ The error format is **not uniform yet** (see the [roadmap](#roadmap)). Check the
 | 409 | `IDEMPOTENCY_IN_PROGRESS` | The original request is still processing, or its outcome is unconfirmed. Retry with the **same** key, never a new one. |
 | 429 | `QUOTA_EXCEEDED` | Monthly allowance used up. |
 | 429 | `DAILY_SEND_LIMIT` | Free keys: daily send cap reached; resets at 00:00 UTC. |
+| 429 | `recipient_rate_limited` | Too many sends to the same recipient. Wait before retrying. |
+| 429 | `SENDER_REPUTATION_SLOWDOWN` | The key is being slowed because of recent bounces or complaints. |
+| 403 | `SENDER_REPUTATION_PAUSED` | The key is paused. Contact SentriSend. |
+| 503 | `SENDER_REPUTATION_UNAVAILABLE` | The reputation check could not be completed. The send is not made. |
 | 503 | `IDEMPOTENCY_UNCONFIRMED` | Response has `doNotRetry: true`. Check what happened to the original request first. |
 
 Some responses carry a `status` field instead of a `code`:
@@ -156,6 +210,7 @@ These tables are not exhaustive. You may also see `401` (missing or invalid key)
 ## Free keys
 
 - One free key per normalised email address. Normalisation removes `+tags` on every domain, removes dots only for Gmail and Googlemail addresses, and treats `googlemail.com` as `gmail.com`. So `you+test@example.com` and `you@example.com` count as the same address.
+- **Already have a free key?** On the sign-up form choose "Regenerate my existing free key". A new sign-up for the same address will not send an email.
 - Sign-up needs a human check and email verification before the key is shown.
 - A free key can send only to its owner's address (including those equivalent spellings), and no more than 10 sends per UTC day.
 
@@ -190,6 +245,8 @@ The same file is in [`examples/validate-signup.mjs`](examples/validate-signup.mj
 
 A blocked verdict is an automated judgement about the domain. Occasionally it will be wrong for a real address, so give people a way to contact you if they are rejected.
 
+Note that this pattern is about your integration. Some SentriSend paths deliberately fail closed: for example, `/send` returns 503 if the sender-reputation check cannot be completed.
+
 ---
 
 ## Limits and pricing
@@ -198,13 +255,13 @@ A blocked verdict is an automated judgement about the domain. Occasionally it wi
 |---|---|---|
 | **Free** | $0 | 100 requests a month, shared between `/validate` calls and sends accepted by the delivery provider. Sends only to your own address, maximum 10 sends per UTC day. |
 | **Pro** | $29 per month | 50,000 requests a month, shared between `/validate` calls and sends. No daily send cap. |
-| **Enterprise** | $299 per month (listed) | Limits are set per key by SentriSend. There is no self-serve checkout yet; use the contact option on the website. |
+| **Enterprise** | $299 per month or $2,490 per year (listed) | Limits are set per key by SentriSend. There is no self-serve checkout yet; use the contact option on the website. |
 
 **White-label.** Removing the SentriSend footer is enabled manually by SentriSend for an account. It is not switched on automatically by subscribing to Pro.
 
-Every admitted `/validate` call uses one unit, including blocked, repeated and malformed-input calls. A send accepted by the provider uses one unit. A replay of a completed idempotent `/send` uses no extra unit.
+Every admitted `/validate` call uses one unit, including blocked, repeated and malformed-input calls. A send accepted by the provider uses one unit. A replay of a completed idempotent `/send` uses no extra unit. Hosted Supabase hook checks are counted separately from these allowances where the dashboard says so.
 
-`/validate` is rate limited per key (bursts of 20, refilling 2 a second) and per IP address (bursts of 100, refilling 10 a second).
+`/validate` is rate limited per key (bursts of 20, refilling 2 a second) and per IP address (bursts of 100, refilling 10 a second). `/send` also limits repeated sends to the same recipient and applies cross-customer abuse controls.
 
 Prices and allowances are set on https://sentrisend.com and may change.
 
@@ -219,10 +276,12 @@ Its limits: it covers your request **before** SentriSend adds its footer or any 
 **What is stored.**
 
 - **`/validate`:** submitted addresses are not persisted in application records. Only quota counters and rate-limit records keyed by hashed key and IP identifiers (not raw IP addresses) are kept.
-- **`/send`:** the audit record keeps the event type, timestamp, risk reasons, the HMAC receipt and a payload snapshot. In that snapshot the recipient, subject, reply-to address and message bodies (HTML and text) are replaced with redaction markers, but **the sender and the intended use are kept as written**. Idempotency records keep a fingerprint of the request, the HTTP status and the response that was returned.
+- **`/send`:** the audit record keeps the event type, timestamp, risk reasons, the HMAC receipt and a payload snapshot. In that snapshot the recipient, subject, reply-to address and message bodies (HTML and text) are replaced with redaction markers, but **the sender and the intended use are kept as written**. Idempotency records keep a fingerprint of the request, the HTTP status and the response that was returned. No fixed retention period for send audit records has been set yet.
+- **Delivery events** (delivered, bounced, complained) are kept as hashed references for 30 days.
+- **Supabase hook request logs** record the email domain only, not the full address, and are kept for 30 days.
 - **Delivery failures** are recorded in the audit record with a generic code (`PROVIDER_DELIVERY_FAILED`), not the provider's raw error text. The error returned to you in the API response is unchanged.
 - Your delivery provider necessarily receives the recipient, subject and body in order to send the message.
-- No fixed retention period for audit records has been set yet, and this page doesn't describe what operational logs, external infrastructure or providers retain.
+- This page doesn't describe what operational logs, external infrastructure or providers retain.
 
 Because the receipt is calculated from the original request, the redacted audit snapshot can't be used to recompute it. Keep your own copy of anything you may need to check later.
 
@@ -240,10 +299,9 @@ It confirms that **the details in a message match what was recorded for that att
 
 These are **not available yet**. They are listed so you know what to expect, not as features.
 
-- Caching of DNS lookups between requests. Today, every validation of a well-formed, non-disposable address does a fresh lookup.
+- Caching of DNS lookups between requests for public validation. Today, every validation of a well-formed, non-disposable address does a fresh lookup.
 - Automatic daily updates of the disposable-domain list. It is currently bundled at build time and updated by release.
-- An installable npm package. A TypeScript client exists but is not published.
-- A Supabase Auth "Send Email" hook example, tested against a live Supabase project.
+- A Supabase Auth "Send Email" hook variant.
 - Standard `X-RateLimit-*` response headers and a single uniform error format across endpoints.
 - A public way to verify send receipts.
 - Self-serve Enterprise checkout.
@@ -255,18 +313,7 @@ These are **not available yet**. They are listed so you know what to expect, not
 ## Support and security
 
 - Questions and bug reports: open a [GitHub issue](../../issues).
-- **Security issues:** please don't post them in a public issue. Use this repository's private reporting: **Security → Report a vulnerability**.
-## npm SDK
-
-`npm install sentrisend`
-
-```js
-import { validate } from "sentrisend";
-const result = await validate("user@example.com", { apiKey: process.env.SENTRISEND_API_KEY });
-if (result.allowed === false) console.log("Blocked:", result.reason);
-```
-
-Default `failureMode: "open"` allows the address on timeout, network failure or API 5xx; `"closed"` throws instead. Server-side only, never in browser code; it does not confirm mailbox existence or detect bots. [sentrisend on npm](https://www.npmjs.com/package/sentrisend)
+- **Security issues:** please don't post them in a public issue. Use this repository's private reporting: **Security > Report a vulnerability**.
 
 ## Licence
 
