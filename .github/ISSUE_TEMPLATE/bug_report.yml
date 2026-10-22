@@ -1,0 +1,41 @@
+name: Bug report
+description: Report a problem with the public documentation or examples.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Never paste API keys, passwords, tokens, or other secrets into an issue.
+  - type: textarea
+    id: what-did-you-do
+    attributes:
+      label: What did you do?
+      description: Include the steps needed to reproduce the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened?
+    validations:
+      required: true
+  - type: input
+    id: endpoint
+    attributes:
+      label: API endpoint, if relevant
+  - type: input
+    id: http-status
+    attributes:
+      label: HTTP status, if relevant
+  - type: input
+    id: error-code
+    attributes:
+      label: Error code, if relevant

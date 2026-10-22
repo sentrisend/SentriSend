@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability privately
+    url: https://github.com/sentrisend/SentriSend/security/advisories/new
+    about: Please do not report security problems in public issues.
+  - name: SentriSend website
+    url: https://sentrisend.com
+    about: Visit the SentriSend website.
