@@ -1,320 +1,78 @@
 # SentriSend
 
-**Email validation, gated sending and a signup-protection hook for Supabase, as a simple HTTP API.**
+SentriSend is an outbound email security gateway for AI agents and applications. It checks a recipient before a message is sent, applies your policy, and returns a signed receipt you can verify without trusting us.
 
-SentriSend checks an email address *before* you send to it or let it sign up: is the syntax valid, is the domain a known disposable provider, does the domain exist, and can it receive mail? It can also send the message for you behind sender-reputation controls and return a signed audit receipt.
+- Website: https://sentrisend.com
+- MCP server (hosted): https://sentrisend.com/mcp
+- OpenAPI description: https://sentrisend.com/openapi.json
+- LLM-readable summary: https://sentrisend.com/llms.txt
+- Receipt verifier: https://sentrisend.com/receipts
 
-What you can use it for:
+This repository contains documentation and examples only. It does not contain the SentriSend service source code.
 
-- **Validate addresses** in signup forms and before sending (`POST /validate`, or the [npm package](https://www.npmjs.com/package/sentrisend)).
-- **Block disposable and non-existent domains in Supabase Auth** with a hosted "Before User Created" hook. No code to deploy: [guide](https://sentrisend.com/supabase).
-- **Send through a gateway** that runs the same address checks, content and threat checks, rate limits and a sender-reputation circuit breaker before the message goes to your delivery provider (`POST /send`).
+## What it does
 
-Links:
+- Pre-send checks on the recipient and a global threat lookup.
+- Policy checks before anything is sent.
+- A public, signed receipt for each single send.
+- A hosted MCP server so an agent can validate an email address before using it.
 
-- Website and free key: **https://sentrisend.com**
-- API base URL: `https://sentrisend.com/api/v1`
-- Built by [Bench Tech Audio Ltd](https://benchtechaudio.com)
+The hosted MCP server currently exposes one tool: `validate_email`.
 
-> This repository holds the public documentation and examples. The service itself is hosted; its source code is not published here.
+## Public send receipts
 
----
+Every successful single send returns a `publicReceipt`: a compact JWS signed with Ed25519 (header type `sentrisend-receipt+jws`).
 
-## What it checks
+The signed payload contains:
 
-`POST /validate` runs these checks on one address:
+- `receiptId` and `issuedAt`
+- `outcome`: `provider_accepted`
+- `checks`: the results of the recipient preflight, global threat lookup and policy check
+- `recipientCommitment` and `messageCommitment`: salted SHA-256 commitments. The recipient address, subject and body are not in the receipt.
 
-| Check | Detail |
-|---|---|
-| Syntax | The address is a plain `name@domain` address of 3-254 characters. Quoted and internationalised address forms are not supported. |
-| Disposable domains | Matched against a bundled list of about 134,100 disposable domains, including their subdomains. |
-| Domain exists | A live DNS lookup tells a non-existent domain apart from a domain with no mail records. |
-| Can receive mail | Looks for MX records. If there are none, a usable IPv4 A record is accepted as a fallback. An explicit "null MX" (a domain that says it takes no mail) is rejected. |
+The original send response also returns `receiptOpening`, which holds the two salts. SentriSend does not store the salts, so keep them if you want to prove later what was sent. Without them, nobody can check the commitments.
 
-**What it does not do.** It does not confirm that a particular mailbox exists, it does not contact the recipient's mail server, and it does not detect role accounts (such as `info@`), suggest typo fixes or detect bots. A passing result means the domain can receive mail, not that the person's mailbox is real.
+### What a receipt shows
 
-**If DNS is slow or unavailable,** the address is allowed with a `MEDIUM` risk score and the reason `DNS_INCONCLUSIVE`, rather than being rejected.
+- SentriSend issued it, and it has not been altered (signature).
+- Which checks ran and their results.
+- If you hold the salts, that a given recipient and message match the commitments.
 
----
+### What a receipt does not show
 
-## Quick start
+- That the message was delivered or read. `provider_accepted` means the email provider accepted it for sending.
+- Anything about the recipient's inbox, or the content of a message you cannot produce.
 
-1. Get a free key at https://sentrisend.com. Keys start with `ss_live_`. There is one free key per normalised email address (see [Free keys](#free-keys)).
-2. Keep the key secret. Use it from your server, never from browser code.
+## Verify a receipt yourself
 
-### Validate an address
+1. Fetch the public keys: `GET https://sentrisend.com/api/v1/receipts/keys`
+2. Split the receipt at the dots. Read the `kid` in the first part and choose the key with that ID.
+3. Check the Ed25519 signature over `header.payload` with that key.
+4. To check the message, compute SHA-256 over:
 
-```bash
-curl -X POST 'https://sentrisend.com/api/v1/validate' \
-  -H 'Authorization: Bearer YOUR_API_KEY' \
-  -H 'Content-Type: application/json' \
-  -d '{"email":"user@example.com"}'
+```
+sentrisend:public-send-receipt:v1:message\0<messageSalt>\0{"subject":...,"html":...,"text":...}
 ```
 
-Allowed (HTTP 200):
+   and compare it to `messageCommitment`. `text` is left out if you did not supply it. The subject is trimmed by the server.
 
-```json
-{"allowed":true,"disposable":false,"risk_score":"LOW"}
-```
+You can also paste a receipt and its opening into https://sentrisend.com/receipts. The comparison runs in your browser.
 
-Blocked (HTTP 400):
+## Using the API
 
-```json
-{"allowed":false,"disposable":true,"reason":"DISPOSABLE_DOMAIN","risk_score":"HIGH"}
-```
+The API requires an `html` body on every send. The full request and response schema, authentication and error codes are in https://sentrisend.com/openapi.json.
 
-`reason` is `DISPOSABLE_DOMAIN`, `DOMAIN_NOT_FOUND` or `NO_MX_RECORDS` for blocked addresses (HTTP 400), or `DNS_INCONCLUSIVE` for an address that is allowed because DNS could not be checked (HTTP 200, `MEDIUM` risk).
+Plans:
 
-`/validate` accepts the key only as `Authorization: Bearer YOUR_API_KEY`.
+- Sandbox: free, no card, 100 requests per month. A Sandbox key sends only to its owner's verified address.
+- Pro: $29 per month, 50,000 requests.
 
-### Use the npm package
+Both plans get receipts on single sends at no extra quota.
 
-```sh
-npm install sentrisend
-```
+## Connecting an agent over MCP
 
-```js
-import { validate } from "sentrisend";
+Add the hosted server URL https://sentrisend.com/mcp to an MCP client that supports remote servers. It is also listed in the official MCP Registry as `com.sentrisend/validation`.
 
-const result = await validate("user@example.com", { apiKey: process.env.SENTRISEND_API_KEY });
-if (result.allowed === false) console.log("Blocked:", result.reason);
-```
+## Support
 
-Node.js 18 or newer, no runtime dependencies. The default `failureMode: "open"` allows the address on timeout, network failure or API 5xx; `"closed"` throws instead. Server-side only. The package validates addresses; it does not send email. See [sentrisend on npm](https://www.npmjs.com/package/sentrisend).
-
-### Send an email
-
-```bash
-curl -X POST 'https://sentrisend.com/api/v1/send' \
-  -H 'Authorization: Bearer YOUR_API_KEY' \
-  -H 'Content-Type: application/json' \
-  -H 'Idempotency-Key: welcome-email-001' \
-  -d '{
-    "to": "user@example.com",
-    "subject": "Welcome",
-    "html": "<p>Your account is ready.</p>"
-  }'
-```
-
-**With a free key, replace `user@example.com` with your own address**, the one you signed up with. Any other recipient returns `403 RECIPIENT_NOT_VERIFIED`.
-
-`/send` runs the same address checks first, plus content-policy and threat-signature checks, abuse controls and sender-reputation checks, then hands the message to the delivery provider. It accepts the key as `Authorization: Bearer ...` or as `x-api-key: ...` (if both are sent, `x-api-key` is used).
-
-Success (HTTP 200). The values shown are illustrative:
-
-```json
-{
-  "success": true,
-  "status": "DELIVERED",
-  "providerId": "PROVIDER_MESSAGE_ID",
-  "attempts": 1,
-  "complianceProof": "hmac-sha256:v1:<64 hex characters>",
-  "receipt": "hmac-sha256:v1:<same value>",
-  "riskLevel": "LOW",
-  "riskScore": 0,
-  "advisories": []
-}
-```
-
-"Delivered" means **the delivery provider accepted the message**. It is not confirmation that it reached an inbox. `status` can also be `DELIVERED_AFTER_RETRY`; `attempts` is 1 to 3; `providerId` can be `null`.
-
-#### Request fields for `/send`
-
-| Field | Required | Notes |
-|---|---|---|
-| `to` | Yes | One address, or a non-empty array of addresses. |
-| `subject` | Yes | 3-100 characters. |
-| `html` | Yes | At least 5 characters. |
-| `text` | No | Plain-text alternative. If supplied, at least 1 character. |
-| `from` | No | Sender address, with or without a display name. Some sender identities are reserved, and your delivery provider must accept the address. |
-| `reply_to` | No | Reply address. |
-| `intendedUse` | No | Free-text label. Defaults to `General Notification`. |
-| `whiteLabel` | No | Requests white-label sending. It only takes effect if SentriSend has enabled it for your account (see [Limits and pricing](#limits-and-pricing)). |
-
-The request body is limited to 100 KB. The optional `Idempotency-Key` header (1-256 characters from `A-Z a-z 0-9 . _ : -`) makes retries safe: reuse the same value for retries of the same email. If you leave it out, a repeat request is treated as a new email.
-
----
-
-## Supabase signup protection (hosted hook)
-
-SentriSend can check every new signup in **Supabase Auth** before the account is created, using Supabase's "Before User Created" HTTP hook. There is nothing to deploy.
-
-1. Get a SentriSend key and create a hook in the SentriSend dashboard. You receive a hook URL and a signing secret.
-2. In Supabase, open **Authentication > Hooks > Before User Created**, choose the HTTP option, and paste the URL and secret.
-3. Test with a signup.
-
-- Allowed signups get `HTTP 200 {}`.
-- Blocked signups get HTTP 200 with a Supabase error object (`http_code` 400, "This email address can't be used to sign up."). The 200 status is intentional: Supabase currently passes hook errors through only when the hook returns 200 or 202.
-- **Fail-open:** if a check times out or fails, the signup is allowed. A missing email, a disabled hook or an unknown hook ID are also allowed.
-- Requests are signature-checked (Standard Webhooks). The hook has its own limit of 60 requests a minute.
-- Safe retries: a retried request gets the earlier verdict and is not charged twice.
-- In our testing, users created directly from the Supabase dashboard do not trigger this hook.
-
-We have tested allow and block against a real Supabase project. Full guide: https://sentrisend.com/supabase
-
----
-
-## Sender-reputation circuit breaker
-
-Sends are tied to an API key, and delivery events (delivered, bounced, complained) are fed back to SentriSend. When a key's recent hard bounces or complaints get too high, the gateway first warns, then slows the key down, and then pauses it. A paused key needs an administrator to un-pause it, after which it runs under a probation period. The aim is to stop one bad send run from damaging your provider account. The exact thresholds are not published.
-
-The stages are covered by automated tests. A live end-to-end threshold test against real bounce events is still to be done, so treat the breaker as new.
-
----
-
-## Errors
-
-The error format is **not uniform yet** (see the [roadmap](#roadmap)). Check the HTTP status first, then `code` or `status`.
-
-### `/validate`
-
-| HTTP | Code | Meaning |
-|---|---|---|
-| 400 | `INVALID_EMAIL` | The address is missing or malformed. |
-| 400 | *(no code; `allowed: false`)* | A blocked verdict, with a `reason`. |
-| 401 | - | Missing or invalid key. |
-| 403 | - | Subscription inactive. |
-| 429 | `RATE_LIMITED` | Too many requests. Includes a `Retry-After` header and a `retry_after` field. |
-| 429 | `QUOTA_EXCEEDED` | Monthly allowance used up. |
-| 503 | - | Authentication, quota or rate-limit service unavailable. |
-
-### `/send`
-
-| HTTP | Code | What to do |
-|---|---|---|
-| 400 | `INVALID_EMAIL`, `DISPOSABLE_DOMAIN_REJECTED`, `DOMAIN_NOT_FOUND`, `NO_MX_RECORDS` | Fix the address. Don't retry unchanged. |
-| 403 | `RECIPIENT_NOT_VERIFIED` | Free keys can only send to the key owner's address. |
-| 409 | `IDEMPOTENCY_CONFLICT` | That `Idempotency-Key` was already used for different content. |
-| 409 | `IDEMPOTENCY_IN_PROGRESS` | The original request is still processing, or its outcome is unconfirmed. Retry with the **same** key, never a new one. |
-| 429 | `QUOTA_EXCEEDED` | Monthly allowance used up. |
-| 429 | `DAILY_SEND_LIMIT` | Free keys: daily send cap reached; resets at 00:00 UTC. |
-| 429 | `recipient_rate_limited` | Too many sends to the same recipient. Wait before retrying. |
-| 429 | `SENDER_REPUTATION_SLOWDOWN` | The key is being slowed because of recent bounces or complaints. |
-| 403 | `SENDER_REPUTATION_PAUSED` | The key is paused. Contact SentriSend. |
-| 503 | `SENDER_REPUTATION_UNAVAILABLE` | The reputation check could not be completed. The send is not made. |
-| 503 | `IDEMPOTENCY_UNCONFIRMED` | Response has `doNotRetry: true`. Check what happened to the original request first. |
-
-Some responses carry a `status` field instead of a `code`:
-
-| HTTP | `status` | Meaning |
-|---|---|---|
-| 403 | `BLOCKED`, `BLOCKED_BY_GLOBAL_INTELLIGENCE` | Rejected by a content-policy or threat check. |
-| 502 | `DELIVERY_FAILED` | The provider reported a failure. The body has `providerError` and `attempts`. Read the error before deciding whether to retry. |
-| 503 | `DELIVERY_UNCONFIRMED` | Response has `doNotRetry: true`. Don't resend blindly. |
-| 503 | `AUDIT_UNCONFIRMED` | **The provider already accepted the email. Don't send it again.** |
-
-These tables are not exhaustive. You may also see `401` (missing or invalid key), `403` (inactive subscription), `413` (request body too large), other `400` responses with only `error` and `details`, and other `503` responses with no code.
-
----
-
-## Free keys
-
-- One free key per normalised email address. Normalisation removes `+tags` on every domain, removes dots only for Gmail and Googlemail addresses, and treats `googlemail.com` as `gmail.com`. So `you+test@example.com` and `you@example.com` count as the same address.
-- **Already have a free key?** On the sign-up form choose "Regenerate my existing free key". A new sign-up for the same address will not send an email.
-- Sign-up needs a human check and email verification before the key is shown.
-- A free key can send only to its owner's address (including those equivalent spellings), and no more than 10 sends per UTC day.
-
----
-
-## Recommended pattern: fail open
-
-Validation should never be the reason a real person can't sign up. Block only on a definite "no" and let everything else through. Here is an example for a signup form (Node 18+):
-
-```js
-export async function checkEmail(email, { apiKey, baseUrl = "https://sentrisend.com/api/v1", timeoutMs = 800 } = {}) {
-  try {
-    const res = await fetch(`${baseUrl}/validate`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ email }),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-    const body = await res.json().catch(() => ({}));
-
-    if (res.status === 200) return { ok: true, verdict: body };
-    if (res.status === 400 && body.allowed === false) return { ok: false, reason: body.reason };
-    if (res.status === 400 && body.code === "INVALID_EMAIL") return { ok: false, reason: "INVALID_EMAIL" };
-    return { ok: true, skipped: true, status: res.status };   // 401, 403, 429, 503 ...: don't block your user
-  } catch {
-    return { ok: true, skipped: true };                        // timeout or network error: don't block your user
-  }
-}
-```
-
-The same file is in [`examples/validate-signup.mjs`](examples/validate-signup.mjs), with a test you can run yourself: `node examples/validate-signup.test.mjs`. The test uses a local mock server and covers success, each blocked reason, invalid input, authentication failure, rate limiting, server errors, non-JSON replies and timeouts. It has not been run against the live service.
-
-A blocked verdict is an automated judgement about the domain. Occasionally it will be wrong for a real address, so give people a way to contact you if they are rejected.
-
-Note that this pattern is about your integration. Some SentriSend paths deliberately fail closed: for example, `/send` returns 503 if the sender-reputation check cannot be completed.
-
----
-
-## Limits and pricing
-
-| Plan | Price | Allowance |
-|---|---|---|
-| **Free** | $0 | 100 requests a month, shared between `/validate` calls and sends accepted by the delivery provider. Sends only to your own address, maximum 10 sends per UTC day. |
-| **Pro** | $29 per month | 50,000 requests a month, shared between `/validate` calls and sends. No daily send cap. |
-| **Enterprise** | $299 per month or $2,490 per year (listed) | Limits are set per key by SentriSend. There is no self-serve checkout yet; use the contact option on the website. |
-
-**White-label.** Removing the SentriSend footer is enabled manually by SentriSend for an account. It is not switched on automatically by subscribing to Pro.
-
-Every admitted `/validate` call uses one unit, including blocked, repeated and malformed-input calls. A send accepted by the provider uses one unit. A replay of a completed idempotent `/send` uses no extra unit. Hosted Supabase hook checks are counted separately from these allowances where the dashboard says so.
-
-`/validate` is rate limited per key (bursts of 20, refilling 2 a second) and per IP address (bursts of 100, refilling 10 a second). `/send` also limits repeated sends to the same recipient and applies cross-customer abuse controls.
-
-Prices and allowances are set on https://sentrisend.com and may change.
-
----
-
-## Audit receipts and your data
-
-**Receipts.** Every **successful** send returns a `complianceProof`: an HMAC-SHA256 value computed on the server over your request as submitted: recipient, subject, HTML, text, sender, reply-to, intended use, the white-label flag in the request body and the idempotency key. It gives you a tamper-evident reference for that request.
-
-Its limits: it covers your request **before** SentriSend adds its footer or any financial seal, and it does not cover the provider's acceptance details. **It cannot be checked independently today**, because the signing secret stays on the server, and there is no public endpoint for verifying send receipts.
-
-**What is stored.**
-
-- **`/validate`:** submitted addresses are not persisted in application records. Only quota counters and rate-limit records keyed by hashed key and IP identifiers (not raw IP addresses) are kept.
-- **`/send`:** the audit record keeps the event type, timestamp, risk reasons, the HMAC receipt and a payload snapshot. In that snapshot the recipient, subject, reply-to address and message bodies (HTML and text) are replaced with redaction markers, but **the sender and the intended use are kept as written**. Idempotency records keep a fingerprint of the request, the HTTP status and the response that was returned. No fixed retention period for send audit records has been set yet.
-- **Delivery events** (delivered, bounced, complained) are kept as hashed references for 30 days.
-- **Supabase hook request logs** record the email domain only, not the full address, and are kept for 30 days.
-- **Delivery failures** are recorded in the audit record with a generic code (`PROVIDER_DELIVERY_FAILED`), not the provider's raw error text. The error returned to you in the API response is unchanged.
-- Your delivery provider necessarily receives the recipient, subject and body in order to send the message.
-- This page doesn't describe what operational logs, external infrastructure or providers retain.
-
-Because the receipt is calculated from the original request, the redacted audit snapshot can't be used to recompute it. Keep your own copy of anything you may need to check later.
-
----
-
-## Financial attestation (beta)
-
-An optional add-on for businesses that email payment details. It is available only for approved account and sender-domain pairs, and identity approval currently supports UK (GB) businesses only. For an approved sender, SentriSend extracts the supported financial details from the message (not arbitrary content), stores a keyed fingerprint, and adds a verification seal that recipients can check at `https://sentrisend.com/verify/<proof_hash>`.
-
-It confirms that **the details in a message match what was recorded for that attested request**. The record is stored before the message is handed to the delivery provider, so it is not proof that the email was sent or delivered. It is also not independent verification of the sender's identity or of the legitimacy of the payment details, and recipients should confirm payment details through a separate channel. Treat it as beta.
-
----
-
-## Roadmap
-
-These are **not available yet**. They are listed so you know what to expect, not as features.
-
-- Caching of DNS lookups between requests for public validation. Today, every validation of a well-formed, non-disposable address does a fresh lookup.
-- Automatic daily updates of the disposable-domain list. It is currently bundled at build time and updated by release.
-- A Supabase Auth "Send Email" hook variant.
-- Standard `X-RateLimit-*` response headers and a single uniform error format across endpoints.
-- A public way to verify send receipts.
-- Self-serve Enterprise checkout.
-- Verified production latency figures. None are available yet.
-- Native-speaker review of the Japanese, Korean, Simplified Chinese and Traditional Chinese (Hong Kong) pages. The site is available in these languages, and corrections are welcome.
-
----
-
-## Support and security
-
-- Questions and bug reports: open a [GitHub issue](../../issues).
-- **Security issues:** please don't post them in a public issue. Use this repository's private reporting: **Security > Report a vulnerability**.
-
-## Licence
-
-The documentation and examples in this repository are released under the MIT licence (see `LICENSE`). The licence covers only the files in this repository.
+Contact details are on https://sentrisend.com.
