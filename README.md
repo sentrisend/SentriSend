@@ -7,6 +7,7 @@ SentriSend is an outbound email security gateway for AI agents and applications.
 - OpenAPI description: https://sentrisend.com/openapi.json
 - LLM-readable summary: https://sentrisend.com/llms.txt
 - Receipt verifier: https://sentrisend.com/receipts
+- Article: https://dev.to/danby/how-to-prove-what-your-ai-agent-emailed-m02
 
 This repository contains documentation and examples only. It does not contain the SentriSend service source code.
 
