@@ -4,6 +4,20 @@ SentriSend is an outbound email security gateway for AI agents and applications.
 
 - Website: https://sentrisend.com
 - MCP server (hosted): https://sentrisend.com/mcp
+## MCP email gateway (for AI agents)
+
+Listed on the official MCP Registry as `com.sentrisend/email-gateway`.
+
+- Endpoint: `https://sentrisend.com/mcp/gateway` (Streamable HTTP)
+- Header: `Authorization: Bearer YOUR_API_KEY`
+- Tools: `validate_email` and `send_email` (one recipient per call)
+- Free keys send only to your own verified address. Developer Pro ($29/month) can send to other recipients.
+- Completed sends return an Ed25519-signed public receipt. It records provider acceptance, not delivery. Check one at https://sentrisend.com/receipts
+
+Setup guide: https://sentrisend.com/mcp-gateway-setup.md
+Article: https://dev.to/danby/how-to-prove-what-your-ai-agent-emailed-m02
+
+Validation only? Use `com.sentrisend/validation` at `https://sentrisend.com/mcp`.
 - OpenAPI description: https://sentrisend.com/openapi.json
 - LLM-readable summary: https://sentrisend.com/llms.txt
 - Receipt verifier: https://sentrisend.com/receipts
