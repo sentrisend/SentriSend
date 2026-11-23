@@ -4,6 +4,7 @@ SentriSend is an outbound email security gateway for AI agents and applications.
 
 - Website: https://sentrisend.com
 - MCP server (hosted): https://sentrisend.com/mcp
+
 ## MCP email gateway (for AI agents)
 
 Listed on the official MCP Registry as `com.sentrisend/email-gateway`.
