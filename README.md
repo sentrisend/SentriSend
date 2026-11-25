@@ -7,16 +7,16 @@ SentriSend is an outbound email security gateway for AI agents and applications.
 
 ## MCP email gateway (for AI agents)
 
-Listed on the official MCP Registry as `com.sentrisend/email-gateway`.
+Now in Claude's Connectors Directory: [SentriSend Email Gateway](https://claude.ai/directory/connectors/sentrisend-email-gateway) (validate and send) and [SentriSend](https://claude.ai/directory/connectors/sentrisend) (validation only). Also on the official MCP Registry as `com.sentrisend/email-gateway`.
 
 - Endpoint: `https://sentrisend.com/mcp/gateway` (Streamable HTTP)
-- Header: `Authorization: Bearer YOUR_API_KEY`
+- Sign-in: OAuth in Claude (no key to paste), or `Authorization: Bearer YOUR_API_KEY` for Grok, llama.cpp, LocalAI and other tools
 - Tools: `validate_email` and `send_email` (one recipient per call)
 - Free keys send only to your own verified address. Developer Pro ($29/month) can send to other recipients.
 - Completed sends return an Ed25519-signed public receipt. It records provider acceptance, not delivery. Check one at https://sentrisend.com/receipts
 
 Setup guide: https://sentrisend.com/mcp-gateway-setup.md
-Article: https://dev.to/danby/how-to-prove-what-your-ai-agent-emailed-m02
+Guide: [Use SentriSend with any AI: Claude, Grok and local Llama](https://dev.to/danby/use-sentrisend-with-any-ai-claude-grok-and-local-llama-3gd5)
 
 Validation only? Use `com.sentrisend/validation` at `https://sentrisend.com/mcp`.
 - OpenAPI description: https://sentrisend.com/openapi.json
